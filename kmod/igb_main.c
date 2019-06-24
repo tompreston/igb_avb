@@ -134,6 +134,9 @@ static void igb_dma_err_timer(unsigned long data);
 static void igb_watchdog_task(struct work_struct *);
 static void igb_dma_err_task(struct work_struct *);
 /* AVB specific */
+#ifdef HAVE_PTP_1588_CLOCK
+static void igb_reset_systim(struct igb_adapter *, struct timespec64 *);
+#endif
 #if defined HAVE_NDO_SELECT_QUEUE_SB_DEV
 static u16 igb_select_queue(struct net_device *dev, struct sk_buff *skb,
 		struct net_device *sb_dev, select_queue_fallback_t fallback);
@@ -224,7 +227,9 @@ static long igb_ioctl_file(struct file *file, unsigned int cmd,
 			   unsigned long arg);
 static void igb_vm_open(struct vm_area_struct *vma);
 static void igb_vm_close(struct vm_area_struct *vma);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,11,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,17,0)
+static vm_fault_t igb_vm_fault(struct vm_fault *fdata);
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,11,0)
 static int igb_vm_fault(struct vm_fault *fdata);
 #else
 static int igb_vm_fault(struct vm_area_struct *area, struct vm_fault *fdata);
@@ -2183,7 +2188,11 @@ static int igb_ndo_fdb_add(struct ndmsg *ndm, struct nlattr *tb[],
 #ifdef HAVE_NDO_FDB_ADD_VID
 			   u16 vid,
 #endif
-			   u16 flags)
+			   u16 flags
+#ifdef HAVE_NDO_FDB_ADD_EXT_ACK
+			   , struct netlink_ext_ack *extack
+#endif
+			  )
 #else /* USE_CONST_DEV_UC_CHAR */
 static int igb_ndo_fdb_add(struct ndmsg *ndm,
 			   struct net_device *dev,
@@ -2276,9 +2285,16 @@ static int igb_ndo_fdb_dump(struct sk_buff *skb,
 
 #ifdef HAVE_BRIDGE_ATTRIBS
 #ifdef HAVE_NDO_BRIDGE_SET_DEL_LINK_FLAGS
+#ifdef HAVE_NETLINK_EXT_ACK
+static int igb_ndo_bridge_setlink(struct net_device *dev,
+				  struct nlmsghdr *nlh,
+				  u16 flags,
+				  struct netlink_ext_ack *extack)
+#else
 static int igb_ndo_bridge_setlink(struct net_device *dev,
 				  struct nlmsghdr *nlh,
 				  u16 flags)
+#endif /* HAVE_NETLINK_EXT_ACK */
 #else
 static int igb_ndo_bridge_setlink(struct net_device *dev,
 				  struct nlmsghdr *nlh)
@@ -2647,6 +2663,9 @@ static int igb_probe(struct pci_dev *pdev,
 	static int global_quad_port_a; /* global quad port a indication */
 	int err, pci_using_dac;
 	static int cards_found;
+#ifdef HAVE_PTP_1588_CLOCK
+	struct timespec64 ts64; 
+#endif
 
 	err = pci_enable_device_mem(pdev);
 	if (err)
@@ -2997,6 +3016,10 @@ static int igb_probe(struct pci_dev *pdev,
 
 	/* reset the hardware with the new settings */
 	igb_reset(adapter);
+#ifdef HAVE_PTP_1588_CLOCK
+	ts64 = ktime_to_timespec64(ktime_get_real());
+	igb_reset_systim(adapter, &ts64);
+#endif
 	adapter->devrc = 0;
 
 #ifdef HAVE_I2C_SUPPORT
@@ -5796,6 +5819,15 @@ static inline struct igb_ring *igb_tx_queue_mapping(struct igb_adapter *adapter,
 }
 #else
 #error Must have multi-queue tx support enabled (CONFIG_NETDEVICES_MULTIQUEUE)!
+#endif
+
+#ifdef HAVE_PTP_1588_CLOCK
+static void igb_reset_systim(struct igb_adapter *adapter, struct timespec64 *ts64)
+{
+	struct e1000_hw *hw = &adapter->hw;
+	E1000_WRITE_REG(hw, E1000_SYSTIML, ts64->tv_nsec);
+	E1000_WRITE_REG(hw, E1000_SYSTIMH, (u32)ts64->tv_sec);
+}
 #endif
 
 #if defined HAVE_NDO_SELECT_QUEUE_SB_DEV
@@ -10896,7 +10928,10 @@ static void igb_vm_open(struct vm_area_struct *vma)
 static void igb_vm_close(struct vm_area_struct *vma)
 {
 }
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,11,0)
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,17,0)
+static vm_fault_t igb_vm_fault(struct vm_fault *fdata)
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,11,0)
 static int igb_vm_fault(struct vm_fault *fdata)
 #else
 static int igb_vm_fault(struct vm_area_struct *area, struct vm_fault *fdata)
